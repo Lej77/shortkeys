@@ -23,6 +23,386 @@ Shortkeys.fetchConfig = (keyCombo) => {
 }
 
 /**
+ * Create an object that allows storage to be safely used by prefixing all keys with a certain text.
+ *
+ * @param keyPrefix
+ */
+Shortkeys.createStorageManager = (keyPrefix) => {
+  let convertKeys = (key) => {
+    if (typeof key === "string") {
+      if (key === "") {
+        return key
+      } else {
+        return keyPrefix + key
+      }
+    } else if (Array.isArray(key)) {
+      return key.map(k => k !== "" && typeof key === "string" ? keyPrefix + k : k)
+    } else if (key) {
+      let newKey = {}
+      for (let property of Object.keys(key)) {
+        newKey[keyPrefix + property] = key[property]
+      }
+      return newKey
+    } else {
+      return key
+    }
+  }
+  let convertResult = () => {
+    let filteredItems = {}
+    for (let property of Object.keys(items)) {
+      if (property.indexOf(keyPrefix) === 0 && property.length > keyPrefix.length) {
+        let newProperty = property.substring(property.indexOf(keyPrefix) + 1)
+        filteredItems[newProperty] = items[property]
+      }
+    }
+    return filteredItems
+  }
+
+
+  let eventListeners = []
+  let isEventRegistered = false
+  let eventCallback = function (changes, areaName) {
+    if (eventListeners.length === 0) {
+      chrome.storage.onChanged.removeListener(eventCallback)
+      isEventRegistered = false
+    } else {
+      let filtered = convertResult(changes)
+      if (Object.keys(filtered).length > 0) {
+        for (let listener of eventListeners) {
+          try {
+            listener(filtered, areaName)
+          } catch (error) { }
+        }
+      }
+    }
+  }
+  let startListening = function () {
+    if (!isEventRegistered) {
+      chrome.storage.onChanged.addListener(eventCallback)
+      isEventRegistered = true
+    }
+  }
+  let stopListening = function () {
+    if (isEventRegistered) {
+      chrome.storage.onChanged.removeListener(eventCallback)
+      isEventRegistered = false
+    }
+  }
+  let onChangeEvent = {
+    addListener(callback) {
+      if (onChangeEvent.hasListener(callback)) {
+        return
+      }
+      if (typeof callback !== "function") {
+        throw new Error("Event callback must be a function")
+      }
+      try {
+        startListening()
+        eventListeners.push(callback)
+      } catch (error) {
+        if (eventListeners.length === 0) {
+          stopListening()
+        }
+        throw error
+      }
+    },
+    removeListener(listener) {
+      if (!onChangeEvent.hasListener(callback)) {
+        return
+      }
+      try {
+        eventListeners.push(callback)
+      } finally {
+        if (eventListeners.length === 0) {
+          stopListening()
+        }
+      }
+    },
+    hasListener(listener) {
+      return eventListeners.indexOf(listener) >= 0
+    },
+  }
+
+  let createStorageAreaManger = function (storage) {
+    let obj = {
+      async get(keys) {
+        return new Promise(function (resolve, reject) {
+          try {
+            storage.get(convertKeys(keys), function (items) {
+              try {
+                if (chrome.runtime.lastError) {
+                  reject(chrome.runtime.lastError)
+                  return
+                }
+
+                if (!keys) {
+                  // Got all values
+                  resolve(convertResult(items))
+                } else {
+                  resolve(items)
+                }
+              } catch (error) {
+                reject(error)
+              }
+            })
+          } catch (error) {
+            reject(error)
+          }
+        })
+      },
+      async getBytesInUse(keys) {
+        return new Promise(async function (resolve, reject) {
+          try {
+            if (!keys) {
+              // Get total storage
+              let items = await obj.get(keys)
+              keys = []
+              for (let property of Object.keys(items)) {
+                keys.push(keyPrefix + property)
+              }
+            }
+
+            storage.getBytesInUse(convertKeys(keys), function (bytesInUse) {
+              try {
+                if (chrome.runtime.lastError) {
+                  reject(chrome.runtime.lastError)
+                  return
+                }
+                resolve(bytesInUse)
+              } catch (error) {
+                reject(error)
+              }
+            })
+          } catch (error) {
+            reject(error)
+          }
+        })
+      },
+      async set(items) {
+        return new Promise(async function (resolve, reject) {
+          try {
+            storage.set(convertKeys(items), function () {
+              try {
+                if (chrome.runtime.lastError) {
+                  reject(chrome.runtime.lastError)
+                  return
+                }
+                resolve()
+              } catch (error) {
+                reject(error)
+              }
+            })
+          } catch (error) {
+            reject(error)
+          }
+        })
+      },
+      async remove(keys) {
+        return new Promise(function (resolve, reject) {
+          try {
+            storage.remove(convertKeys(items), function () {
+              try {
+                if (chrome.runtime.lastError) {
+                  reject(chrome.runtime.lastError)
+                  return
+                }
+                resolve()
+              } catch (error) {
+                reject(error)
+              }
+            })
+          } catch (error) {
+            reject(error)
+          }
+        })
+      },
+      async clear() {
+        await obj.remove(await obj.get(null))
+      },
+    }
+    // Return a copy of the object:
+    return Object.assign({}, obj)
+  }
+
+  let local = createStorageAreaManger(chrome.storage.local)
+  let sync = createStorageAreaManger(chrome.storage.sync)
+
+  let manager = {
+    keyPrefix: keyPrefix,
+    get onChanged() {
+      // Return a copy of the object:
+      return Object.assign({}, onChangeEvent)
+    },
+    get local() {
+      // Return a copy of the object:
+      return Object.assign({}, local)
+    },
+    get sync() {
+      // Return a copy of the object:
+      return Object.assign({}, sync)
+    },
+  }
+
+  // Return a copy of the object:
+  return Object.assign({}, manager)
+}
+
+/**
+ * Executes a function in the background script or gets/sets a property in the background script.
+ *
+ * @param propertyName
+ * @param args
+ * @param propertyAccess
+ * @returns {Promise}
+ */
+Shortkeys.backgroundOperation = async (propertyName, args, supportFunctionArgs, propertyAccess = false) => {
+  if (!Array.isArray(args)) {
+    args = []
+  } else if (propertyAccess && args.length > 1) {
+    args.length = 1
+  }
+
+  // Handle args that are functions
+  let functionArgs = []
+  let functions = []
+  if (supportFunctionArgs) {
+    for (let i = 0; i < args.length; i++) {
+      if (typeof args[i] === "function") {
+        functionArgs.push(i)
+        functions.push(args[i])
+        args[i] = null
+      }
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    try {
+      // Send op info to background script:
+      chrome.runtime.sendMessage({
+        action: "backgroundoperation",
+        property: propertyName,
+        operation: (propertyAccess ? "propertyAccess" : "functionCall"),
+        args: args,
+        functionArgs: functionArgs,
+      }, function (response) {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError)
+          return
+        }
+        if (functionArgs.length === 0) {
+          // Response is return value. Resolve promise with value:
+          try {
+            if (response.error) {
+              reject(response.error)
+            } else {
+              resolve(response.result)
+            }
+          } catch (err) {
+            reject(err)
+          }
+        } else if (response.calledArg && response.args) {
+          // Response was to an arg that is a function. Call it:
+          let index = functionArgs.indexOf(response.calledArg)
+          if (index >= 0)
+            functions[index].apply(null, response.args)
+          return
+        }
+      })
+      if (functionArgs.length > 0) {
+        // The response of this op is reserved for an arg that is a function
+        resolve(undefined)
+      }
+    } catch (err) {
+      reject(err)
+    }
+  })
+}
+
+/**
+ * Log a value in the console via the background script.
+ *
+ * @param value
+ */
+Shortkeys.log = async (value) => {
+  chrome.runtime.sendMessage({
+    action: "log",
+    value: value,
+  })
+}
+
+/**
+ * Execute some code as a content script
+ *
+ * @param code
+ * @param isAsync
+ * @param hideExtensionVars
+ * @param allowFunctionArgs
+ */
+Shortkeys.contentScript = async (code, isAsync = true, hideExtensionVars = false, allowFunctionArgs = true) => {
+  if (isAsync) {
+    // Make script code async and allow await:
+    code = "async function a() {\n" + code + "\n}\nreturn a()"
+  }
+  if (hideExtensionVars) {
+    // Hide extension objects from user's content scripts
+    // Can be circumvented by the use of "new Function(code)"
+    code = "var chrome = undefined\n" + "var browser = undefined\n" + code
+  }
+  
+  // Create script first run variables:
+  try {
+    if (!window.scriptStorage) {
+      // Create global. Accessable to all iFrames in the tab.
+      window.scriptStorage = {}
+    }
+  } catch (error) { }
+  try {
+    if (!Shortkeys.scriptStorageManager) {
+      Shortkeys.scriptStorageManager = Shortkeys.createStorageManager("script_")
+    }
+  } catch (err) {}
+  
+  try {
+    let script = new Function("call", "get", "set", "log", "inject", "storage", "data", code)
+    await script(
+      function (functionName) {
+        let args = Array.from(arguments)
+        if (args.length > 0)
+          args.splice(0, 1)
+        return Shortkeys.backgroundOperation(functionName, args, allowFunctionArgs)
+      },
+      function (propertyName) {
+        return Shortkeys.backgroundOperation(propertyName, [], allowFunctionArgs, true)
+      },
+      function (propertyName, value) {
+        return Shortkeys.backgroundOperation(propertyName, [value], allowFunctionArgs, true)
+      },
+      Shortkeys.log,
+      Shortkeys.injectScript,
+      Object.assign({}, Shortkeys.scriptStorageManager),
+      window.scriptStorage
+    )
+  } catch (error) {
+    let logMessage = "Shortkeys user script - Uncaught error:\n" + error
+    console.log(logMessage)
+    Shortkeys.log(logMessage)
+  }
+}
+
+/**
+ * It's a little hacky, but we have to insert JS this way rather than using executeScript() from the background JS,
+ * because this way we have access to the libraries that exist on the page on any given site, such as jQuery.
+ *
+ * @param code
+ */
+Shortkeys.injectScript = (code) => {
+  let script = document.createElement('script')
+  script.textContent = code
+  document.body.appendChild(script)
+  document.body.removeChild(script)
+}
+
+/**
  * Given a key shortcut config item, carry out the action configured for it.
  * This is what happens when the user triggers the shortcut.
  *
@@ -35,13 +415,12 @@ Shortkeys.doAction = (keySetting) => {
     message[attribute] = keySetting[attribute]
   }
 
-  // It's a little hacky, but we have to insert JS this way rather than using executeScript() from the background JS,
-  // because this way we have access to the libraries that exist on the page on any given site, such as jQuery.
   if (action === 'javascript') {
-    let script = document.createElement('script')
-    script.textContent = keySetting.code
-    document.body.appendChild(script)
-    document.body.removeChild(script)
+    if (keySetting.isContentScript) {
+      Shortkeys.contentScript(keySetting.code)
+    } else {
+      Shortkeys.injectScript(keySetting.code)
+    }
     return
   } else if (action === 'trigger') {
     Mousetrap.trigger(keySetting.trigger)
